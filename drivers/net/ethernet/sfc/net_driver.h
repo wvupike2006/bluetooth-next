@@ -831,6 +831,7 @@ struct efx_arfs_rule {
 /**
  * struct efx_async_filter_insertion - Request to asynchronously insert a filter
  * @net_dev: Reference to the netdevice
+ * @net_dev_tracker: reference tracker entry for @net_dev
  * @spec: The filter to insert
  * @work: Workitem for this request
  * @rxq_index: Identifies the channel for which this request was made
@@ -838,6 +839,7 @@ struct efx_arfs_rule {
  */
 struct efx_async_filter_insertion {
 	struct net_device *net_dev;
+	netdevice_tracker net_dev_tracker;
 	struct efx_filter_spec spec;
 	struct work_struct work;
 	u16 rxq_index;
@@ -1004,6 +1006,7 @@ struct efx_mae;
  * @dl_port: devlink port associated with the PF
  * @mem_bar: The BAR that is mapped into membase.
  * @reg_base: Offset from the start of the bar to the function control window.
+ * @reflash_mutex: Mutex for serialising firmware reflash operations.
  * @monitor_work: Hardware monitor workitem
  * @biu_lock: BIU (bus interface unit) lock
  * @last_irq_cpu: Last CPU to handle a possible test interrupt.  This
@@ -1189,6 +1192,7 @@ struct efx_nic {
 	struct devlink_port *dl_port;
 	unsigned int mem_bar;
 	u32 reg_base;
+	struct mutex reflash_mutex;
 
 	/* The following fields may be written more often */
 

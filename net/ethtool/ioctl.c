@@ -425,7 +425,7 @@ convert_link_ksettings_to_legacy_settings(
 
 /* layout of the struct passed from/to userland */
 struct ethtool_link_usettings {
-	struct ethtool_link_settings_hdr base;
+	struct ethtool_link_settings base;
 	struct {
 		__u32 supported[__ETHTOOL_LINK_MODE_MASK_NU32];
 		__u32 advertising[__ETHTOOL_LINK_MODE_MASK_NU32];
@@ -992,7 +992,19 @@ static noinline_for_stack int ethtool_set_rxnfc(struct net_device *dev,
 	if (rc)
 		return rc;
 
-	if (ops->get_rxfh) {
+	if (cmd == ETHTOOL_SRXCLSRLINS && info.fs.flow_type & FLOW_RSS) {
+		/* Nonzero ring with RSS only makes sense
+		 * if NIC adds them together
+		 */
+		if (!ops->cap_rss_rxnfc_adds &&
+		    ethtool_get_flow_spec_ring(info.fs.ring_cookie))
+			return -EINVAL;
+
+		if (!xa_load(&dev->ethtool->rss_ctx, info.rss_context))
+			return -EINVAL;
+	}
+
+	if (cmd == ETHTOOL_SRXFH && ops->get_rxfh) {
 		struct ethtool_rxfh_param rxfh = {};
 
 		rc = ops->get_rxfh(dev, &rxfh);

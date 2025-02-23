@@ -32,6 +32,7 @@
 #include <linux/phy_link_topology.h>
 #include <linux/pse-pd/pse.h>
 #include <linux/property.h>
+#include <linux/ptp_clock_kernel.h>
 #include <linux/rtnetlink.h>
 #include <linux/sfp.h>
 #include <linux/skbuff.h>
@@ -43,6 +44,17 @@
 MODULE_DESCRIPTION("PHY library");
 MODULE_AUTHOR("Andy Fleming");
 MODULE_LICENSE("GPL");
+
+#define	PHY_ANY_ID	"MATCH ANY PHY"
+#define	PHY_ANY_UID	0xffffffff
+
+struct phy_fixup {
+	struct list_head list;
+	char bus_id[MII_BUS_ID_SIZE + 3];
+	u32 phy_uid;
+	u32 phy_uid_mask;
+	int (*run)(struct phy_device *phydev);
+};
 
 __ETHTOOL_DECLARE_LINK_MODE_MASK(phy_basic_features) __ro_after_init;
 EXPORT_SYMBOL_GPL(phy_basic_features);
@@ -59,14 +71,8 @@ EXPORT_SYMBOL_GPL(phy_gbit_features);
 __ETHTOOL_DECLARE_LINK_MODE_MASK(phy_gbit_fibre_features) __ro_after_init;
 EXPORT_SYMBOL_GPL(phy_gbit_fibre_features);
 
-__ETHTOOL_DECLARE_LINK_MODE_MASK(phy_gbit_all_ports_features) __ro_after_init;
-EXPORT_SYMBOL_GPL(phy_gbit_all_ports_features);
-
 __ETHTOOL_DECLARE_LINK_MODE_MASK(phy_10gbit_features) __ro_after_init;
 EXPORT_SYMBOL_GPL(phy_10gbit_features);
-
-__ETHTOOL_DECLARE_LINK_MODE_MASK(phy_10gbit_fec_features) __ro_after_init;
-EXPORT_SYMBOL_GPL(phy_10gbit_fec_features);
 
 const int phy_basic_ports_array[3] = {
 	ETHTOOL_LINK_MODE_Autoneg_BIT,
@@ -75,12 +81,7 @@ const int phy_basic_ports_array[3] = {
 };
 EXPORT_SYMBOL_GPL(phy_basic_ports_array);
 
-const int phy_fibre_port_array[1] = {
-	ETHTOOL_LINK_MODE_FIBRE_BIT,
-};
-EXPORT_SYMBOL_GPL(phy_fibre_port_array);
-
-const int phy_all_ports_features_array[7] = {
+static const int phy_all_ports_features_array[7] = {
 	ETHTOOL_LINK_MODE_Autoneg_BIT,
 	ETHTOOL_LINK_MODE_TP_BIT,
 	ETHTOOL_LINK_MODE_MII_BIT,
@@ -89,52 +90,28 @@ const int phy_all_ports_features_array[7] = {
 	ETHTOOL_LINK_MODE_BNC_BIT,
 	ETHTOOL_LINK_MODE_Backplane_BIT,
 };
-EXPORT_SYMBOL_GPL(phy_all_ports_features_array);
 
-const int phy_10_100_features_array[4] = {
+static const int phy_10_100_features_array[4] = {
 	ETHTOOL_LINK_MODE_10baseT_Half_BIT,
 	ETHTOOL_LINK_MODE_10baseT_Full_BIT,
 	ETHTOOL_LINK_MODE_100baseT_Half_BIT,
 	ETHTOOL_LINK_MODE_100baseT_Full_BIT,
 };
-EXPORT_SYMBOL_GPL(phy_10_100_features_array);
 
-const int phy_basic_t1_features_array[3] = {
+static const int phy_basic_t1_features_array[3] = {
 	ETHTOOL_LINK_MODE_TP_BIT,
 	ETHTOOL_LINK_MODE_10baseT1L_Full_BIT,
 	ETHTOOL_LINK_MODE_100baseT1_Full_BIT,
 };
-EXPORT_SYMBOL_GPL(phy_basic_t1_features_array);
 
-const int phy_basic_t1s_p2mp_features_array[2] = {
+static const int phy_basic_t1s_p2mp_features_array[2] = {
 	ETHTOOL_LINK_MODE_TP_BIT,
 	ETHTOOL_LINK_MODE_10baseT1S_P2MP_Half_BIT,
 };
-EXPORT_SYMBOL_GPL(phy_basic_t1s_p2mp_features_array);
 
-const int phy_gbit_features_array[2] = {
+static const int phy_gbit_features_array[2] = {
 	ETHTOOL_LINK_MODE_1000baseT_Half_BIT,
 	ETHTOOL_LINK_MODE_1000baseT_Full_BIT,
-};
-EXPORT_SYMBOL_GPL(phy_gbit_features_array);
-
-const int phy_10gbit_features_array[1] = {
-	ETHTOOL_LINK_MODE_10000baseT_Full_BIT,
-};
-EXPORT_SYMBOL_GPL(phy_10gbit_features_array);
-
-static const int phy_10gbit_fec_features_array[1] = {
-	ETHTOOL_LINK_MODE_10000baseR_FEC_BIT,
-};
-
-__ETHTOOL_DECLARE_LINK_MODE_MASK(phy_10gbit_full_features) __ro_after_init;
-EXPORT_SYMBOL_GPL(phy_10gbit_full_features);
-
-static const int phy_10gbit_full_features_array[] = {
-	ETHTOOL_LINK_MODE_10baseT_Full_BIT,
-	ETHTOOL_LINK_MODE_100baseT_Full_BIT,
-	ETHTOOL_LINK_MODE_1000baseT_Full_BIT,
-	ETHTOOL_LINK_MODE_10000baseT_Full_BIT,
 };
 
 static const int phy_eee_cap1_features_array[] = {
@@ -198,20 +175,7 @@ static void features_init(void)
 	linkmode_set_bit_array(phy_gbit_features_array,
 			       ARRAY_SIZE(phy_gbit_features_array),
 			       phy_gbit_fibre_features);
-	linkmode_set_bit_array(phy_fibre_port_array,
-			       ARRAY_SIZE(phy_fibre_port_array),
-			       phy_gbit_fibre_features);
-
-	/* 10/100 half/full + 1000 half/full + TP/MII/FIBRE/AUI/BNC/Backplane*/
-	linkmode_set_bit_array(phy_all_ports_features_array,
-			       ARRAY_SIZE(phy_all_ports_features_array),
-			       phy_gbit_all_ports_features);
-	linkmode_set_bit_array(phy_10_100_features_array,
-			       ARRAY_SIZE(phy_10_100_features_array),
-			       phy_gbit_all_ports_features);
-	linkmode_set_bit_array(phy_gbit_features_array,
-			       ARRAY_SIZE(phy_gbit_features_array),
-			       phy_gbit_all_ports_features);
+	linkmode_set_bit(ETHTOOL_LINK_MODE_FIBRE_BIT, phy_gbit_fibre_features);
 
 	/* 10/100 half/full + 1000 half/full + 10G full*/
 	linkmode_set_bit_array(phy_all_ports_features_array,
@@ -223,21 +187,9 @@ static void features_init(void)
 	linkmode_set_bit_array(phy_gbit_features_array,
 			       ARRAY_SIZE(phy_gbit_features_array),
 			       phy_10gbit_features);
-	linkmode_set_bit_array(phy_10gbit_features_array,
-			       ARRAY_SIZE(phy_10gbit_features_array),
-			       phy_10gbit_features);
+	linkmode_set_bit(ETHTOOL_LINK_MODE_10000baseT_Full_BIT,
+			 phy_10gbit_features);
 
-	/* 10/100/1000/10G full */
-	linkmode_set_bit_array(phy_all_ports_features_array,
-			       ARRAY_SIZE(phy_all_ports_features_array),
-			       phy_10gbit_full_features);
-	linkmode_set_bit_array(phy_10gbit_full_features_array,
-			       ARRAY_SIZE(phy_10gbit_full_features_array),
-			       phy_10gbit_full_features);
-	/* 10G FEC only */
-	linkmode_set_bit_array(phy_10gbit_fec_features_array,
-			       ARRAY_SIZE(phy_10gbit_fec_features_array),
-			       phy_10gbit_fec_features);
 	linkmode_set_bit_array(phy_eee_cap1_features_array,
 			       ARRAY_SIZE(phy_eee_cap1_features_array),
 			       phy_eee_cap1_features);
@@ -427,8 +379,8 @@ static SIMPLE_DEV_PM_OPS(mdio_bus_phy_pm_ops, mdio_bus_phy_suspend,
  *	comparison
  * @run: The actual code to be run when a matching PHY is found
  */
-int phy_register_fixup(const char *bus_id, u32 phy_uid, u32 phy_uid_mask,
-		       int (*run)(struct phy_device *))
+static int phy_register_fixup(const char *bus_id, u32 phy_uid, u32 phy_uid_mask,
+			      int (*run)(struct phy_device *))
 {
 	struct phy_fixup *fixup = kzalloc(sizeof(*fixup), GFP_KERNEL);
 
@@ -446,7 +398,6 @@ int phy_register_fixup(const char *bus_id, u32 phy_uid, u32 phy_uid_mask,
 
 	return 0;
 }
-EXPORT_SYMBOL(phy_register_fixup);
 
 /* Registers a fixup to be run on any PHY with the UID in phy_uid */
 int phy_register_fixup_for_uid(u32 phy_uid, u32 phy_uid_mask,
@@ -593,7 +544,7 @@ phy_interface_show(struct device *dev, struct device_attribute *attr, char *buf)
 	struct phy_device *phydev = to_phy_device(dev);
 	const char *mode = NULL;
 
-	if (phy_is_internal(phydev))
+	if (phydev->is_internal)
 		mode = "internal";
 	else
 		mode = phy_modes(phydev->interface);
@@ -1998,6 +1949,15 @@ void phy_detach(struct phy_device *phydev)
 
 	phy_suspend(phydev);
 	if (dev) {
+		struct hwtstamp_provider *hwprov;
+
+		hwprov = rtnl_dereference(dev->hwprov);
+		/* Disable timestamp if it is the one selected */
+		if (hwprov && hwprov->phydev == phydev) {
+			rcu_assign_pointer(dev->hwprov, NULL);
+			kfree_rcu(hwprov, rcu_head);
+		}
+
 		phydev->attached_dev->phydev = NULL;
 		phydev->attached_dev = NULL;
 		phy_link_topo_del_phy(dev, phydev);
@@ -2994,6 +2954,23 @@ void phy_support_eee(struct phy_device *phydev)
 EXPORT_SYMBOL(phy_support_eee);
 
 /**
+ * phy_disable_eee - Disable EEE for the PHY
+ * @phydev: Target phy_device struct
+ *
+ * This function is used by MAC drivers for MAC's which don't support EEE.
+ * It disables EEE on the PHY layer.
+ */
+void phy_disable_eee(struct phy_device *phydev)
+{
+	linkmode_zero(phydev->advertising_eee);
+	phydev->eee_cfg.tx_lpi_enabled = false;
+	phydev->eee_cfg.eee_enabled = false;
+	/* don't let userspace re-enable EEE advertisement */
+	linkmode_fill(phydev->eee_disabled_modes);
+}
+EXPORT_SYMBOL_GPL(phy_disable_eee);
+
+/**
  * phy_support_sym_pause - Enable support of symmetrical pause
  * @phydev: target phy_device struct
  *
@@ -3119,19 +3096,12 @@ void phy_get_pause(struct phy_device *phydev, bool *tx_pause, bool *rx_pause)
 EXPORT_SYMBOL(phy_get_pause);
 
 #if IS_ENABLED(CONFIG_OF_MDIO)
-static int phy_get_int_delay_property(struct device *dev, const char *name)
+static int phy_get_u32_property(struct device *dev, const char *name, u32 *val)
 {
-	s32 int_delay;
-	int ret;
-
-	ret = device_property_read_u32(dev, name, &int_delay);
-	if (ret)
-		return ret;
-
-	return int_delay;
+	return device_property_read_u32(dev, name, val);
 }
 #else
-static int phy_get_int_delay_property(struct device *dev, const char *name)
+static int phy_get_u32_property(struct device *dev, const char *name, u32 *val)
 {
 	return -EINVAL;
 }
@@ -3156,12 +3126,12 @@ static int phy_get_int_delay_property(struct device *dev, const char *name)
 s32 phy_get_internal_delay(struct phy_device *phydev, struct device *dev,
 			   const int *delay_values, int size, bool is_rx)
 {
-	s32 delay;
-	int i;
+	int i, ret;
+	u32 delay;
 
 	if (is_rx) {
-		delay = phy_get_int_delay_property(dev, "rx-internal-delay-ps");
-		if (delay < 0 && size == 0) {
+		ret = phy_get_u32_property(dev, "rx-internal-delay-ps", &delay);
+		if (ret < 0 && size == 0) {
 			if (phydev->interface == PHY_INTERFACE_MODE_RGMII_ID ||
 			    phydev->interface == PHY_INTERFACE_MODE_RGMII_RXID)
 				return 1;
@@ -3170,8 +3140,8 @@ s32 phy_get_internal_delay(struct phy_device *phydev, struct device *dev,
 		}
 
 	} else {
-		delay = phy_get_int_delay_property(dev, "tx-internal-delay-ps");
-		if (delay < 0 && size == 0) {
+		ret = phy_get_u32_property(dev, "tx-internal-delay-ps", &delay);
+		if (ret < 0 && size == 0) {
 			if (phydev->interface == PHY_INTERFACE_MODE_RGMII_ID ||
 			    phydev->interface == PHY_INTERFACE_MODE_RGMII_TXID)
 				return 1;
@@ -3180,8 +3150,8 @@ s32 phy_get_internal_delay(struct phy_device *phydev, struct device *dev,
 		}
 	}
 
-	if (delay < 0)
-		return delay;
+	if (ret < 0)
+		return ret;
 
 	if (size == 0)
 		return delay;
@@ -3215,6 +3185,30 @@ s32 phy_get_internal_delay(struct phy_device *phydev, struct device *dev,
 	return -EINVAL;
 }
 EXPORT_SYMBOL(phy_get_internal_delay);
+
+/**
+ * phy_get_tx_amplitude_gain - stores tx amplitude gain in @val
+ * @phydev: phy_device struct
+ * @dev: pointer to the devices device struct
+ * @linkmode: linkmode for which the tx amplitude gain should be retrieved
+ * @val: tx amplitude gain
+ *
+ * Returns: 0 on success, < 0 on failure
+ */
+int phy_get_tx_amplitude_gain(struct phy_device *phydev, struct device *dev,
+			      enum ethtool_link_mode_bit_indices linkmode,
+			      u32 *val)
+{
+	switch (linkmode) {
+	case ETHTOOL_LINK_MODE_100baseT_Full_BIT:
+		return phy_get_u32_property(dev,
+					    "tx-amplitude-100base-tx-percent",
+					    val);
+	default:
+		return -EINVAL;
+	}
+}
+EXPORT_SYMBOL_GPL(phy_get_tx_amplitude_gain);
 
 static int phy_led_set_brightness(struct led_classdev *led_cdev,
 				  enum led_brightness value)
@@ -3586,22 +3580,21 @@ static int phy_probe(struct device *dev)
 	if (err)
 		goto out;
 
+	/* Get the EEE modes we want to prohibit. */
+	of_set_phy_eee_broken(phydev);
+
+	/* Some PHYs may advertise, by default, not support EEE modes. So,
+	 * we need to clean them. In addition remove all disabled EEE modes.
+	 */
+	linkmode_and(phydev->advertising_eee, phydev->supported_eee,
+		     phydev->advertising_eee);
+	linkmode_andnot(phydev->advertising_eee, phydev->advertising_eee,
+			phydev->eee_disabled_modes);
+
 	/* There is no "enabled" flag. If PHY is advertising, assume it is
 	 * kind of enabled.
 	 */
-	phydev->eee_enabled = !linkmode_empty(phydev->advertising_eee);
-
-	/* Some PHYs may advertise, by default, not support EEE modes. So,
-	 * we need to clean them.
-	 */
-	if (phydev->eee_enabled)
-		linkmode_and(phydev->advertising_eee, phydev->supported_eee,
-			     phydev->advertising_eee);
-
-	/* Get the EEE modes we want to prohibit. We will ask
-	 * the PHY stop advertising these mode later on
-	 */
-	of_set_phy_eee_broken(phydev);
+	phydev->eee_cfg.eee_enabled = !linkmode_empty(phydev->advertising_eee);
 
 	/* Get master/slave strap overrides */
 	of_set_phy_timing_role(phydev);
@@ -3773,6 +3766,8 @@ static const struct ethtool_phy_ops phy_ethtool_phy_ops = {
 static const struct phylib_stubs __phylib_stubs = {
 	.hwtstamp_get = __phy_hwtstamp_get,
 	.hwtstamp_set = __phy_hwtstamp_set,
+	.get_phy_stats = __phy_ethtool_get_phy_stats,
+	.get_link_ext_stats = __phy_ethtool_get_link_ext_stats,
 };
 
 static void phylib_register_stubs(void)

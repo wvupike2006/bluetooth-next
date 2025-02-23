@@ -280,6 +280,7 @@ prestera_mac_select_pcs(struct phylink_config *config,
 }
 
 static void prestera_pcs_get_state(struct phylink_pcs *pcs,
+				   unsigned int neg_mode,
 				   struct phylink_link_state *state)
 {
 	struct prestera_port *port = container_of(pcs, struct prestera_port,
@@ -395,7 +396,6 @@ static int prestera_port_sfp_bind(struct prestera_port *port)
 			continue;
 
 		port->phylink_pcs.ops = &prestera_pcs_ops;
-		port->phylink_pcs.neg_mode = true;
 
 		port->phy_config.dev = &port->dev->dev;
 		port->phy_config.type = PHYLINK_NETDEV;

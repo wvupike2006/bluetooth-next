@@ -141,7 +141,6 @@ static int ipgre_err(struct sk_buff *skb, u32 info,
 	const struct iphdr *iph;
 	const int type = icmp_hdr(skb)->type;
 	const int code = icmp_hdr(skb)->code;
-	unsigned int data_len = 0;
 	struct ip_tunnel *t;
 
 	if (tpi->proto == htons(ETH_P_TEB))
@@ -182,7 +181,6 @@ static int ipgre_err(struct sk_buff *skb, u32 info,
 	case ICMP_TIME_EXCEEDED:
 		if (code != ICMP_EXC_TTL)
 			return 0;
-		data_len = icmp_hdr(skb)->un.reserved[1] * 4; /* RFC 4884 4.1 */
 		break;
 
 	case ICMP_REDIRECT:
@@ -190,10 +188,16 @@ static int ipgre_err(struct sk_buff *skb, u32 info,
 	}
 
 #if IS_ENABLED(CONFIG_IPV6)
-	if (tpi->proto == htons(ETH_P_IPV6) &&
-	    !ip6_err_gen_icmpv6_unreach(skb, iph->ihl * 4 + tpi->hdr_len,
-					type, data_len))
-		return 0;
+	if (tpi->proto == htons(ETH_P_IPV6)) {
+		unsigned int data_len = 0;
+
+		if (type == ICMP_TIME_EXCEEDED)
+			data_len = icmp_hdr(skb)->un.reserved[1] * 4; /* RFC 4884 4.1 */
+
+		if (!ip6_err_gen_icmpv6_unreach(skb, iph->ihl * 4 + tpi->hdr_len,
+						type, data_len))
+			return 0;
+	}
 #endif
 
 	if (t->parms.iph.daddr == 0 ||
@@ -924,15 +928,18 @@ static int ipgre_open(struct net_device *dev)
 	struct ip_tunnel *t = netdev_priv(dev);
 
 	if (ipv4_is_multicast(t->parms.iph.daddr)) {
-		struct flowi4 fl4;
+		struct flowi4 fl4 = {
+			.flowi4_oif = t->parms.link,
+			.flowi4_tos = inet_dscp_to_dsfield(ip4h_dscp(&t->parms.iph)),
+			.flowi4_scope = RT_SCOPE_UNIVERSE,
+			.flowi4_proto = IPPROTO_GRE,
+			.saddr = t->parms.iph.saddr,
+			.daddr = t->parms.iph.daddr,
+			.fl4_gre_key = t->parms.o_key,
+		};
 		struct rtable *rt;
 
-		rt = ip_route_output_gre(t->net, &fl4,
-					 t->parms.iph.daddr,
-					 t->parms.iph.saddr,
-					 t->parms.o_key,
-					 t->parms.iph.tos & INET_DSCP_MASK,
-					 t->parms.link);
+		rt = ip_route_output_key(t->net, &fl4);
 		if (IS_ERR(rt))
 			return -EADDRNOTAVAIL;
 		dev = rt->dst.dev;

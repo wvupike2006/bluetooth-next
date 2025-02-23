@@ -318,7 +318,7 @@ static void unlist_file(struct epitems_head *head)
 static long long_zero;
 static long long_max = LONG_MAX;
 
-static struct ctl_table epoll_table[] = {
+static const struct ctl_table epoll_table[] = {
 	{
 		.procname	= "max_user_watches",
 		.data		= &max_user_watches,
@@ -447,7 +447,7 @@ static bool ep_busy_loop(struct eventpoll *ep, int nonblock)
 	if (!budget)
 		budget = BUSY_POLL_BUDGET;
 
-	if (napi_id >= MIN_NAPI_ID && ep_busy_loop_on(ep)) {
+	if (napi_id_valid(napi_id) && ep_busy_loop_on(ep)) {
 		napi_busy_loop(napi_id, nonblock ? NULL : ep_busy_loop_end,
 			       ep, prefer_busy_poll, budget);
 		if (ep_events_available(ep))
@@ -492,7 +492,7 @@ static inline void ep_set_busy_poll_napi_id(struct epitem *epi)
 	 *	or
 	 * Nothing to do if we already have this ID
 	 */
-	if (napi_id < MIN_NAPI_ID || napi_id == ep->napi_id)
+	if (!napi_id_valid(napi_id) || napi_id == ep->napi_id)
 		return;
 
 	/* record NAPI ID for use in next busy poll */
@@ -546,7 +546,7 @@ static void ep_suspend_napi_irqs(struct eventpoll *ep)
 {
 	unsigned int napi_id = READ_ONCE(ep->napi_id);
 
-	if (napi_id >= MIN_NAPI_ID && READ_ONCE(ep->prefer_busy_poll))
+	if (napi_id_valid(napi_id) && READ_ONCE(ep->prefer_busy_poll))
 		napi_suspend_irqs(napi_id);
 }
 
@@ -554,7 +554,7 @@ static void ep_resume_napi_irqs(struct eventpoll *ep)
 {
 	unsigned int napi_id = READ_ONCE(ep->napi_id);
 
-	if (napi_id >= MIN_NAPI_ID && READ_ONCE(ep->prefer_busy_poll))
+	if (napi_id_valid(napi_id) && READ_ONCE(ep->prefer_busy_poll))
 		napi_resume_irqs(napi_id);
 }
 
@@ -852,7 +852,8 @@ static bool __ep_remove(struct eventpoll *ep, struct epitem *epi, bool force)
 	to_free = NULL;
 	head = file->f_ep;
 	if (head->first == &epi->fllink && !epi->fllink.next) {
-		file->f_ep = NULL;
+		/* See eventpoll_release() for details. */
+		WRITE_ONCE(file->f_ep, NULL);
 		if (!is_file_epoll(file)) {
 			struct epitems_head *v;
 			v = container_of(head, struct epitems_head, epitems);
@@ -1031,7 +1032,7 @@ static struct file *epi_fget(const struct epitem *epi)
 	struct file *file;
 
 	file = epi->ffd.file;
-	if (!atomic_long_inc_not_zero(&file->f_count))
+	if (!file_ref_get(&file->f_ref))
 		file = NULL;
 	return file;
 }
@@ -1401,7 +1402,10 @@ static int ep_poll_callback(wait_queue_entry_t *wait, unsigned mode, int sync, v
 				break;
 			}
 		}
-		wake_up(&ep->wq);
+		if (sync)
+			wake_up_sync(&ep->wq);
+		else
+			wake_up(&ep->wq);
 	}
 	if (waitqueue_active(&ep->poll_wait))
 		pwake++;
@@ -1632,7 +1636,8 @@ allocate:
 			spin_unlock(&file->f_lock);
 			goto allocate;
 		}
-		file->f_ep = head;
+		/* See eventpoll_release() for details. */
+		WRITE_ONCE(file->f_ep, head);
 		to_free = NULL;
 	}
 	hlist_add_head_rcu(&epi->fllink, file->f_ep);
@@ -2286,25 +2291,22 @@ int do_epoll_ctl(int epfd, int op, int fd, struct epoll_event *epds,
 {
 	int error;
 	int full_check = 0;
-	struct fd f, tf;
 	struct eventpoll *ep;
 	struct epitem *epi;
 	struct eventpoll *tep = NULL;
 
-	error = -EBADF;
-	f = fdget(epfd);
-	if (!fd_file(f))
-		goto error_return;
+	CLASS(fd, f)(epfd);
+	if (fd_empty(f))
+		return -EBADF;
 
 	/* Get the "struct file *" for the target file */
-	tf = fdget(fd);
-	if (!fd_file(tf))
-		goto error_fput;
+	CLASS(fd, tf)(fd);
+	if (fd_empty(tf))
+		return -EBADF;
 
 	/* The target file descriptor must support poll */
-	error = -EPERM;
 	if (!file_can_poll(fd_file(tf)))
-		goto error_tgt_fput;
+		return -EPERM;
 
 	/* Check if EPOLLWAKEUP is allowed */
 	if (ep_op_has_event(op))
@@ -2423,12 +2425,6 @@ error_tgt_fput:
 		loop_check_gen++;
 		mutex_unlock(&epnested_mutex);
 	}
-
-	fdput(tf);
-error_fput:
-	fdput(f);
-error_return:
-
 	return error;
 }
 
@@ -2456,8 +2452,6 @@ SYSCALL_DEFINE4(epoll_ctl, int, epfd, int, op, int, fd,
 static int do_epoll_wait(int epfd, struct epoll_event __user *events,
 			 int maxevents, struct timespec64 *to)
 {
-	int error;
-	struct fd f;
 	struct eventpoll *ep;
 
 	/* The maximum number of event must be greater than zero */
@@ -2469,17 +2463,16 @@ static int do_epoll_wait(int epfd, struct epoll_event __user *events,
 		return -EFAULT;
 
 	/* Get the "struct file *" for the eventpoll file */
-	f = fdget(epfd);
-	if (!fd_file(f))
+	CLASS(fd, f)(epfd);
+	if (fd_empty(f))
 		return -EBADF;
 
 	/*
 	 * We have to check that the file structure underneath the fd
 	 * the user passed to us _is_ an eventpoll file.
 	 */
-	error = -EINVAL;
 	if (!is_file_epoll(fd_file(f)))
-		goto error_fput;
+		return -EINVAL;
 
 	/*
 	 * At this point it is safe to assume that the "private_data" contains
@@ -2488,11 +2481,7 @@ static int do_epoll_wait(int epfd, struct epoll_event __user *events,
 	ep = fd_file(f)->private_data;
 
 	/* Time to fish for events ... */
-	error = ep_poll(ep, events, maxevents, to);
-
-error_fput:
-	fdput(f);
-	return error;
+	return ep_poll(ep, events, maxevents, to);
 }
 
 SYSCALL_DEFINE4(epoll_wait, int, epfd, struct epoll_event __user *, events,

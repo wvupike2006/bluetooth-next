@@ -454,6 +454,13 @@ static int sock_set_timeout(long *timeo_p, sockptr_t optval, int optlen,
 	return 0;
 }
 
+static bool sk_set_prio_allowed(const struct sock *sk, int val)
+{
+	return ((val >= TC_PRIO_BESTEFFORT && val <= TC_PRIO_INTERACTIVE) ||
+		sockopt_ns_capable(sock_net(sk)->user_ns, CAP_NET_RAW) ||
+		sockopt_ns_capable(sock_net(sk)->user_ns, CAP_NET_ADMIN));
+}
+
 static bool sock_needs_netstamp(const struct sock *sk)
 {
 	switch (sk->sk_family) {
@@ -931,6 +938,7 @@ int sock_set_timestamping(struct sock *sk, int optname,
 
 	WRITE_ONCE(sk->sk_tsflags, val);
 	sock_valbool_flag(sk, SOCK_TSTAMP_NEW, optname == SO_TIMESTAMPING_NEW);
+	sock_valbool_flag(sk, SOCK_TIMESTAMPING_ANY, !!(val & TSFLAGS_ANY));
 
 	if (val & SOF_TIMESTAMPING_RX_SOFTWARE)
 		sock_enable_timestamp(sk,
@@ -1047,32 +1055,34 @@ static int sock_reserve_memory(struct sock *sk, int bytes)
 
 #ifdef CONFIG_PAGE_POOL
 
-/* This is the number of tokens that the user can SO_DEVMEM_DONTNEED in
- * 1 syscall. The limit exists to limit the amount of memory the kernel
- * allocates to copy these tokens.
+/* This is the number of tokens and frags that the user can SO_DEVMEM_DONTNEED
+ * in 1 syscall. The limit exists to limit the amount of memory the kernel
+ * allocates to copy these tokens, and to prevent looping over the frags for
+ * too long.
  */
 #define MAX_DONTNEED_TOKENS 128
+#define MAX_DONTNEED_FRAGS 1024
 
 static noinline_for_stack int
 sock_devmem_dontneed(struct sock *sk, sockptr_t optval, unsigned int optlen)
 {
 	unsigned int num_tokens, i, j, k, netmem_num = 0;
 	struct dmabuf_token *tokens;
+	int ret = 0, num_frags = 0;
 	netmem_ref netmems[16];
-	int ret = 0;
 
 	if (!sk_is_tcp(sk))
 		return -EBADF;
 
-	if (optlen % sizeof(struct dmabuf_token) ||
+	if (optlen % sizeof(*tokens) ||
 	    optlen > sizeof(*tokens) * MAX_DONTNEED_TOKENS)
 		return -EINVAL;
 
-	tokens = kvmalloc_array(optlen, sizeof(*tokens), GFP_KERNEL);
+	num_tokens = optlen / sizeof(*tokens);
+	tokens = kvmalloc_array(num_tokens, sizeof(*tokens), GFP_KERNEL);
 	if (!tokens)
 		return -ENOMEM;
 
-	num_tokens = optlen / sizeof(struct dmabuf_token);
 	if (copy_from_sockptr(tokens, optval, optlen)) {
 		kvfree(tokens);
 		return -EFAULT;
@@ -1081,24 +1091,28 @@ sock_devmem_dontneed(struct sock *sk, sockptr_t optval, unsigned int optlen)
 	xa_lock_bh(&sk->sk_user_frags);
 	for (i = 0; i < num_tokens; i++) {
 		for (j = 0; j < tokens[i].token_count; j++) {
+			if (++num_frags > MAX_DONTNEED_FRAGS)
+				goto frag_limit_reached;
+
 			netmem_ref netmem = (__force netmem_ref)__xa_erase(
 				&sk->sk_user_frags, tokens[i].token_start + j);
 
-			if (netmem &&
-			    !WARN_ON_ONCE(!netmem_is_net_iov(netmem))) {
-				netmems[netmem_num++] = netmem;
-				if (netmem_num == ARRAY_SIZE(netmems)) {
-					xa_unlock_bh(&sk->sk_user_frags);
-					for (k = 0; k < netmem_num; k++)
-						WARN_ON_ONCE(!napi_pp_put_page(netmems[k]));
-					netmem_num = 0;
-					xa_lock_bh(&sk->sk_user_frags);
-				}
-				ret++;
+			if (!netmem || WARN_ON_ONCE(!netmem_is_net_iov(netmem)))
+				continue;
+
+			netmems[netmem_num++] = netmem;
+			if (netmem_num == ARRAY_SIZE(netmems)) {
+				xa_unlock_bh(&sk->sk_user_frags);
+				for (k = 0; k < netmem_num; k++)
+					WARN_ON_ONCE(!napi_pp_put_page(netmems[k]));
+				netmem_num = 0;
+				xa_lock_bh(&sk->sk_user_frags);
 			}
+			ret++;
 		}
 	}
 
+frag_limit_reached:
 	xa_unlock_bh(&sk->sk_user_frags);
 	for (k = 0; k < netmem_num; k++)
 		WARN_ON_ONCE(!napi_pp_put_page(netmems[k]));
@@ -1187,9 +1201,7 @@ int sk_setsockopt(struct sock *sk, int level, int optname,
 	/* handle options which do not require locking the socket. */
 	switch (optname) {
 	case SO_PRIORITY:
-		if ((val >= 0 && val <= 6) ||
-		    sockopt_ns_capable(sock_net(sk)->user_ns, CAP_NET_RAW) ||
-		    sockopt_ns_capable(sock_net(sk)->user_ns, CAP_NET_ADMIN)) {
+		if (sk_set_prio_allowed(sk, val)) {
 			sock_set_priority(sk, val);
 			return 0;
 		}
@@ -1289,7 +1301,10 @@ int sk_setsockopt(struct sock *sk, int level, int optname,
 		sk->sk_reuse = (valbool ? SK_CAN_REUSE : SK_NO_REUSE);
 		break;
 	case SO_REUSEPORT:
-		sk->sk_reuseport = valbool;
+		if (valbool && !sk_is_inet(sk))
+			ret = -EOPNOTSUPP;
+		else
+			sk->sk_reuseport = valbool;
 		break;
 	case SO_DONTROUTE:
 		sock_valbool_flag(sk, SOCK_LOCALROUTE, valbool);
@@ -1506,6 +1521,10 @@ set_sndbuf:
 		break;
 	case SO_RCVMARK:
 		sock_valbool_flag(sk, SOCK_RCVMARK, valbool);
+		break;
+
+	case SO_RCVPRIORITY:
+		sock_valbool_flag(sk, SOCK_RCVPRIORITY, valbool);
 		break;
 
 	case SO_RXQ_OVFL:
@@ -1936,6 +1955,10 @@ int sk_getsockopt(struct sock *sk, int level, int optname,
 		v.val = sock_flag(sk, SOCK_RCVMARK);
 		break;
 
+	case SO_RCVPRIORITY:
+		v.val = sock_flag(sk, SOCK_RCVPRIORITY);
+		break;
+
 	case SO_RXQ_OVFL:
 		v.val = sock_flag(sk, SOCK_RXQ_OVFL);
 		break;
@@ -2019,7 +2042,7 @@ int sk_getsockopt(struct sock *sk, int level, int optname,
 		v.val = READ_ONCE(sk->sk_napi_id);
 
 		/* aggregate non-NAPI IDs down to 0 */
-		if (v.val < MIN_NAPI_ID)
+		if (!napi_id_valid(v.val))
 			v.val = 0;
 
 		break;
@@ -2935,6 +2958,13 @@ int __sock_cmsg_send(struct sock *sk, struct cmsghdr *cmsg,
 	/* SCM_RIGHTS and SCM_CREDENTIALS are semantically in SOL_UNIX. */
 	case SCM_RIGHTS:
 	case SCM_CREDENTIALS:
+		break;
+	case SO_PRIORITY:
+		if (cmsg->cmsg_len != CMSG_LEN(sizeof(u32)))
+			return -EINVAL;
+		if (!sk_set_prio_allowed(sk, *(u32 *)CMSG_DATA(cmsg)))
+			return -EPERM;
+		sockc->priority = *(u32 *)CMSG_DATA(cmsg);
 		break;
 	default:
 		return -EINVAL;
@@ -3852,7 +3882,7 @@ void sk_get_meminfo(const struct sock *sk, u32 *mem)
 	mem[SK_MEMINFO_RCVBUF] = READ_ONCE(sk->sk_rcvbuf);
 	mem[SK_MEMINFO_WMEM_ALLOC] = sk_wmem_alloc_get(sk);
 	mem[SK_MEMINFO_SNDBUF] = READ_ONCE(sk->sk_sndbuf);
-	mem[SK_MEMINFO_FWD_ALLOC] = sk_forward_alloc_get(sk);
+	mem[SK_MEMINFO_FWD_ALLOC] = READ_ONCE(sk->sk_forward_alloc);
 	mem[SK_MEMINFO_WMEM_QUEUED] = READ_ONCE(sk->sk_wmem_queued);
 	mem[SK_MEMINFO_OPTMEM] = atomic_read(&sk->sk_omem_alloc);
 	mem[SK_MEMINFO_BACKLOG] = READ_ONCE(sk->sk_backlog.len);

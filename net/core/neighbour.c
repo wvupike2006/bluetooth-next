@@ -832,12 +832,10 @@ static int pneigh_ifdown_and_unlock(struct neigh_table *tbl,
 	return -ENOENT;
 }
 
-static void neigh_parms_destroy(struct neigh_parms *parms);
-
 static inline void neigh_parms_put(struct neigh_parms *parms)
 {
 	if (refcount_dec_and_test(&parms->refcnt))
-		neigh_parms_destroy(parms);
+		kfree(parms);
 }
 
 /*
@@ -1712,11 +1710,6 @@ void neigh_parms_release(struct neigh_table *tbl, struct neigh_parms *parms)
 	call_rcu(&parms->rcu_head, neigh_rcu_free_parms);
 }
 EXPORT_SYMBOL(neigh_parms_release);
-
-static void neigh_parms_destroy(struct neigh_parms *parms)
-{
-	kfree(parms);
-}
 
 static struct lock_class_key neigh_table_proxy_queue_class;
 
@@ -2824,6 +2817,7 @@ static int neigh_dump_info(struct sk_buff *skb, struct netlink_callback *cb)
 	err = neigh_valid_dump_req(nlh, cb->strict_check, &filter, cb->extack);
 	if (err < 0 && cb->strict_check)
 		return err;
+	err = 0;
 
 	s_t = cb->args[0];
 
@@ -3446,10 +3440,12 @@ static const struct seq_operations neigh_stat_seq_ops = {
 static void __neigh_notify(struct neighbour *n, int type, int flags,
 			   u32 pid)
 {
-	struct net *net = dev_net(n->dev);
 	struct sk_buff *skb;
 	int err = -ENOBUFS;
+	struct net *net;
 
+	rcu_read_lock();
+	net = dev_net_rcu(n->dev);
 	skb = nlmsg_new(neigh_nlmsg_size(), GFP_ATOMIC);
 	if (skb == NULL)
 		goto errout;
@@ -3462,9 +3458,11 @@ static void __neigh_notify(struct neighbour *n, int type, int flags,
 		goto errout;
 	}
 	rtnl_notify(skb, net, 0, RTNLGRP_NEIGH, NULL, GFP_ATOMIC);
-	return;
+	goto out;
 errout:
 	rtnl_set_sk_err(net, RTNLGRP_NEIGH, err);
+out:
+	rcu_read_unlock();
 }
 
 void neigh_app_ns(struct neighbour *n)

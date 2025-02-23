@@ -688,11 +688,6 @@ static int genphy_c45_write_eee_adv(struct phy_device *phydev,
 	if (linkmode_intersects(phydev->supported_eee, PHY_EEE_CAP1_FEATURES)) {
 		val = linkmode_to_mii_eee_cap1_t(adv);
 
-		/* In eee_broken_modes are stored MDIO_AN_EEE_ADV specific raw
-		 * register values.
-		 */
-		val &= ~phydev->eee_broken_modes;
-
 		/* IEEE 802.3-2018 45.2.7.13 EEE advertisement 1
 		 * (Register 7.60)
 		 */
@@ -943,7 +938,7 @@ EXPORT_SYMBOL_GPL(genphy_c45_read_eee_abilities);
  */
 int genphy_c45_an_config_eee_aneg(struct phy_device *phydev)
 {
-	if (!phydev->eee_enabled) {
+	if (!phydev->eee_cfg.eee_enabled) {
 		__ETHTOOL_DECLARE_LINK_MODE_MASK(adv) = {};
 
 		return genphy_c45_write_eee_adv(phydev, adv);
@@ -1469,46 +1464,29 @@ EXPORT_SYMBOL_GPL(genphy_c45_plca_get_status);
 /**
  * genphy_c45_eee_is_active - get EEE status
  * @phydev: target phy_device struct
- * @adv: variable to store advertised linkmodes
  * @lp: variable to store LP advertised linkmodes
- * @is_enabled: variable to store EEE enabled/disabled configuration value
  *
- * Description: this function will read local and link partner PHY
- * advertisements. Compare them return current EEE state.
+ * Description: this function will read link partner PHY advertisement
+ * and compare it to local advertisement to return current EEE state.
  */
-int genphy_c45_eee_is_active(struct phy_device *phydev, unsigned long *adv,
-			     unsigned long *lp, bool *is_enabled)
+int genphy_c45_eee_is_active(struct phy_device *phydev, unsigned long *lp)
 {
-	__ETHTOOL_DECLARE_LINK_MODE_MASK(tmp_adv) = {};
 	__ETHTOOL_DECLARE_LINK_MODE_MASK(tmp_lp) = {};
 	__ETHTOOL_DECLARE_LINK_MODE_MASK(common);
-	bool eee_enabled, eee_active;
 	int ret;
-
-	ret = genphy_c45_read_eee_adv(phydev, tmp_adv);
-	if (ret)
-		return ret;
 
 	ret = genphy_c45_read_eee_lpa(phydev, tmp_lp);
 	if (ret)
 		return ret;
 
-	eee_enabled = !linkmode_empty(tmp_adv);
-	linkmode_and(common, tmp_adv, tmp_lp);
-	if (eee_enabled && !linkmode_empty(common))
-		eee_active = phy_check_valid(phydev->speed, phydev->duplex,
-					     common);
-	else
-		eee_active = false;
-
-	if (adv)
-		linkmode_copy(adv, tmp_adv);
 	if (lp)
 		linkmode_copy(lp, tmp_lp);
-	if (is_enabled)
-		*is_enabled = eee_enabled;
 
-	return eee_active;
+	linkmode_and(common, phydev->advertising_eee, tmp_lp);
+	if (linkmode_empty(common))
+		return 0;
+
+	return phy_check_valid(phydev->speed, phydev->duplex, common);
 }
 EXPORT_SYMBOL(genphy_c45_eee_is_active);
 
@@ -1523,18 +1501,16 @@ EXPORT_SYMBOL(genphy_c45_eee_is_active);
 int genphy_c45_ethtool_get_eee(struct phy_device *phydev,
 			       struct ethtool_keee *data)
 {
-	bool is_enabled;
 	int ret;
 
-	ret = genphy_c45_eee_is_active(phydev, data->advertised,
-				       data->lp_advertised, &is_enabled);
+	ret = genphy_c45_eee_is_active(phydev, data->lp_advertised);
 	if (ret < 0)
 		return ret;
 
-	data->eee_enabled = is_enabled;
-	data->eee_active = ret;
-	linkmode_copy(data->supported, phydev->supported_eee);
-
+	data->eee_active = phydev->eee_active;
+	linkmode_andnot(data->supported, phydev->supported_eee,
+			phydev->eee_disabled_modes);
+	linkmode_copy(data->advertised, phydev->advertising_eee);
 	return 0;
 }
 EXPORT_SYMBOL(genphy_c45_ethtool_get_eee);
@@ -1567,13 +1543,13 @@ int genphy_c45_ethtool_set_eee(struct phy_device *phydev,
 				phydev_warn(phydev, "At least some EEE link modes are not supported.\n");
 				return -EINVAL;
 			}
-			linkmode_copy(phydev->advertising_eee, adv);
+
+			linkmode_andnot(phydev->advertising_eee, adv,
+					phydev->eee_disabled_modes);
 		} else if (linkmode_empty(phydev->advertising_eee)) {
 			phy_advertise_eee_all(phydev);
 		}
 	}
-
-	phydev->eee_enabled = data->eee_enabled;
 
 	ret = genphy_c45_an_config_eee_aneg(phydev);
 	if (ret > 0) {

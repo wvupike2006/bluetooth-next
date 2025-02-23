@@ -8,6 +8,7 @@
 obj-$(CONFIG_FBNIC) += fbnic.o
 
 fbnic-y := fbnic_csr.o \
+	   fbnic_debugfs.o \
 	   fbnic_devlink.o \
 	   fbnic_ethtool.o \
 	   fbnic_fw.o \
@@ -19,6 +20,7 @@ fbnic-y := fbnic_csr.o \
 	   fbnic_pci.o \
 	   fbnic_phylink.o \
 	   fbnic_rpc.o \
+	   fbnic_time.o \
 	   fbnic_tlv.o \
 	   fbnic_txrx.o \
-	   fbnic_time.o
+# End of objects

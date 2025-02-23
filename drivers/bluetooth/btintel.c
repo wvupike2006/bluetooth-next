@@ -9,6 +9,7 @@
 #include <linux/module.h>
 #include <linux/firmware.h>
 #include <linux/regmap.h>
+#include <linux/string_choices.h>
 #include <linux/acpi.h>
 #include <acpi/acpi_bus.h>
 #include <linux/unaligned.h>
@@ -477,6 +478,7 @@ int btintel_version_info_tlv(struct hci_dev *hdev,
 	case 0x1c:	/* Gale Peak (GaP) */
 	case 0x1d:	/* BlazarU (BzrU) */
 	case 0x1e:	/* BlazarI (Bzr) */
+	case 0x1f:      /* Scorpious Peak */
 		break;
 	default:
 		bt_dev_err(hdev, "Unsupported Intel hardware variant (0x%x)",
@@ -506,13 +508,13 @@ int btintel_version_info_tlv(struct hci_dev *hdev,
 
 		bt_dev_info(hdev, "Device revision is %u", version->dev_rev_id);
 		bt_dev_info(hdev, "Secure boot is %s",
-			    version->secure_boot ? "enabled" : "disabled");
+			    str_enabled_disabled(version->secure_boot));
 		bt_dev_info(hdev, "OTP lock is %s",
-			    version->otp_lock ? "enabled" : "disabled");
+			    str_enabled_disabled(version->otp_lock));
 		bt_dev_info(hdev, "API lock is %s",
-			    version->api_lock ? "enabled" : "disabled");
+			    str_enabled_disabled(version->api_lock));
 		bt_dev_info(hdev, "Debug lock is %s",
-			    version->debug_lock ? "enabled" : "disabled");
+			    str_enabled_disabled(version->debug_lock));
 		bt_dev_info(hdev, "Minimum firmware build %u week %u %u",
 			    version->min_fw_build_nn, version->min_fw_build_cw,
 			    2000 + version->min_fw_build_yy);
@@ -927,16 +929,16 @@ int btintel_read_boot_params(struct hci_dev *hdev,
 		    le16_to_cpu(params->dev_revid));
 
 	bt_dev_info(hdev, "Secure boot is %s",
-		    params->secure_boot ? "enabled" : "disabled");
+		    str_enabled_disabled(params->secure_boot));
 
 	bt_dev_info(hdev, "OTP lock is %s",
-		    params->otp_lock ? "enabled" : "disabled");
+		    str_enabled_disabled(params->otp_lock));
 
 	bt_dev_info(hdev, "API lock is %s",
-		    params->api_lock ? "enabled" : "disabled");
+		    str_enabled_disabled(params->api_lock));
 
 	bt_dev_info(hdev, "Debug lock is %s",
-		    params->debug_lock ? "enabled" : "disabled");
+		    str_enabled_disabled(params->debug_lock));
 
 	bt_dev_info(hdev, "Minimum firmware build %u week %u %u",
 		    params->min_fw_build_nn, params->min_fw_build_cw,
@@ -2755,6 +2757,7 @@ static int btintel_set_dsbr(struct hci_dev *hdev, struct intel_version_tlv *ver)
 	/* DSBR command needs to be sent for,
 	 * 1. BlazarI or BlazarIW + B0 step product in IML image.
 	 * 2. Gale Peak2 or BlazarU in OP image.
+	 * 3. Scorpious Peak in IML image.
 	 */
 
 	switch (cnvi) {
@@ -2768,6 +2771,10 @@ static int btintel_set_dsbr(struct hci_dev *hdev, struct intel_version_tlv *ver)
 	case BTINTEL_CNVI_BLAZARU:
 		if (ver->img_type == BTINTEL_IMG_OP &&
 		    hdev->bus == HCI_USB)
+			break;
+		return 0;
+	case BTINTEL_CNVI_SCP:
+		if (ver->img_type == BTINTEL_IMG_IML)
 			break;
 		return 0;
 	default:
@@ -2918,6 +2925,7 @@ void btintel_set_msft_opcode(struct hci_dev *hdev, u8 hw_variant)
 	case 0x1c:
 	case 0x1d:
 	case 0x1e:
+	case 0x1f:
 		hci_set_msft_opcode(hdev, 0xFC1E);
 		break;
 	default:
@@ -3257,6 +3265,7 @@ static int btintel_setup_combined(struct hci_dev *hdev)
 	case 0x1b:
 	case 0x1d:
 	case 0x1e:
+	case 0x1f:
 		/* Display version information of TLV type */
 		btintel_version_info_tlv(hdev, &ver_tlv);
 

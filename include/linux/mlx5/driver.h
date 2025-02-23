@@ -54,7 +54,6 @@
 #include <linux/mlx5/doorbell.h>
 #include <linux/mlx5/eq.h>
 #include <linux/timecounter.h>
-#include <linux/ptp_clock_kernel.h>
 #include <net/devlink.h>
 
 #define MLX5_ADEV_NAME "mlx5_core"
@@ -160,9 +159,12 @@ enum {
 	MLX5_REG_MIRC		 = 0x9162,
 	MLX5_REG_MTPTM		 = 0x9180,
 	MLX5_REG_MTCTR		 = 0x9181,
+	MLX5_REG_MRTCQ		 = 0x9182,
 	MLX5_REG_SBCAM		 = 0xB01F,
 	MLX5_REG_RESOURCE_DUMP   = 0xC000,
+	MLX5_REG_NIC_CAP	 = 0xC00D,
 	MLX5_REG_DTOR            = 0xC00E,
+	MLX5_REG_VHCA_ICM_CTRL	 = 0xC010,
 };
 
 enum mlx5_qpts_trust_state {
@@ -524,6 +526,7 @@ enum {
 	 * creation/deletion on drivers rescan. Unset during device attach.
 	 */
 	MLX5_PRIV_FLAGS_DETACH = 1 << 2,
+	MLX5_PRIV_FLAGS_SWITCH_LEGACY = 1 << 3,
 };
 
 struct mlx5_adev {
@@ -675,34 +678,8 @@ struct mlx5_rsvd_gids {
 	struct ida ida;
 };
 
-#define MAX_PIN_NUM	8
-struct mlx5_pps {
-	u8                         pin_caps[MAX_PIN_NUM];
-	struct work_struct         out_work;
-	u64                        start[MAX_PIN_NUM];
-	u8                         enabled;
-	u64                        min_npps_period;
-	u64                        min_out_pulse_duration_ns;
-};
-
-struct mlx5_timer {
-	struct cyclecounter        cycles;
-	struct timecounter         tc;
-	u32                        nominal_c_mult;
-	unsigned long              overflow_period;
-	struct delayed_work        overflow_work;
-};
-
-struct mlx5_clock {
-	struct mlx5_nb             pps_nb;
-	seqlock_t                  lock;
-	struct hwtstamp_config     hwtstamp_config;
-	struct ptp_clock          *ptp;
-	struct ptp_clock_info      ptp_info;
-	struct mlx5_pps            pps_info;
-	struct mlx5_timer          timer;
-};
-
+struct mlx5_clock;
+struct mlx5_clock_dev_state;
 struct mlx5_dm;
 struct mlx5_fw_tracer;
 struct mlx5_vxlan;
@@ -786,7 +763,8 @@ struct mlx5_core_dev {
 #ifdef CONFIG_MLX5_FPGA
 	struct mlx5_fpga_device *fpga;
 #endif
-	struct mlx5_clock        clock;
+	struct mlx5_clock       *clock;
+	struct mlx5_clock_dev_state *clock_state;
 	struct mlx5_ib_clock_info  *clock_info;
 	struct mlx5_fw_tracer   *tracer;
 	struct mlx5_rsc_dump    *rsc_dump;
@@ -1200,6 +1178,12 @@ static inline bool mlx5_core_is_pf(const struct mlx5_core_dev *dev)
 static inline bool mlx5_core_is_vf(const struct mlx5_core_dev *dev)
 {
 	return dev->coredev_type == MLX5_COREDEV_VF;
+}
+
+static inline bool mlx5_core_same_coredev_type(const struct mlx5_core_dev *dev1,
+					       const struct mlx5_core_dev *dev2)
+{
+	return dev1->coredev_type == dev2->coredev_type;
 }
 
 static inline bool mlx5_core_is_ecpf(const struct mlx5_core_dev *dev)

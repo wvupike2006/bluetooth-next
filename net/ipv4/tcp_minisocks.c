@@ -157,8 +157,11 @@ tcp_timewait_state_process(struct inet_timewait_sock *tw, struct sk_buff *skb,
 				    rcv_nxt);
 
 		if (tmp_opt.saw_tstamp) {
+			u64 ts = tcp_clock_ms();
+
+			WRITE_ONCE(tw->tw_entry_stamp, ts);
 			WRITE_ONCE(tcptw->tw_ts_recent_stamp,
-				  ktime_get_seconds());
+				   div_u64(ts, MSEC_PER_SEC));
 			WRITE_ONCE(tcptw->tw_ts_recent,
 				   tmp_opt.rcv_tsval);
 		}
@@ -261,7 +264,7 @@ kill:
 	inet_twsk_put(tw);
 	return TCP_TW_SUCCESS;
 }
-EXPORT_SYMBOL(tcp_timewait_state_process);
+EXPORT_IPV6_MOD(tcp_timewait_state_process);
 
 static void tcp_time_wait_init(struct sock *sk, struct tcp_timewait_sock *tcptw)
 {
@@ -316,6 +319,8 @@ void tcp_time_wait(struct sock *sk, int state, int timeo)
 		tw->tw_mark		= sk->sk_mark;
 		tw->tw_priority		= READ_ONCE(sk->sk_priority);
 		tw->tw_rcv_wscale	= tp->rx_opt.rcv_wscale;
+		/* refreshed when we enter true TIME-WAIT state */
+		tw->tw_entry_stamp	= tcp_time_stamp_ms(tp);
 		tcptw->tw_rcv_nxt	= tp->rcv_nxt;
 		tcptw->tw_snd_nxt	= tp->snd_nxt;
 		tcptw->tw_rcv_wnd	= tcp_receive_window(tp);
@@ -326,6 +331,10 @@ void tcp_time_wait(struct sock *sk, int state, int timeo)
 		tcptw->tw_last_oow_ack_time = 0;
 		tcptw->tw_tx_delay	= tp->tcp_tx_delay;
 		tw->tw_txhash		= sk->sk_txhash;
+		tw->tw_tx_queue_mapping = sk->sk_tx_queue_mapping;
+#ifdef CONFIG_SOCK_RX_QUEUE_MAPPING
+		tw->tw_rx_queue_mapping = sk->sk_rx_queue_mapping;
+#endif
 #if IS_ENABLED(CONFIG_IPV6)
 		if (tw->tw_family == PF_INET6) {
 			struct ipv6_pinfo *np = inet6_sk(sk);
@@ -389,7 +398,7 @@ void tcp_twsk_destructor(struct sock *sk)
 #endif
 	tcp_ao_destroy_sock(sk, true);
 }
-EXPORT_SYMBOL_GPL(tcp_twsk_destructor);
+EXPORT_IPV6_MOD_GPL(tcp_twsk_destructor);
 
 void tcp_twsk_purge(struct list_head *net_exit_list)
 {
@@ -448,7 +457,6 @@ void tcp_openreq_init_rwin(struct request_sock *req,
 		rcv_wnd);
 	ireq->rcv_wscale = rcv_wscale;
 }
-EXPORT_SYMBOL(tcp_openreq_init_rwin);
 
 static void tcp_ecn_openreq_child(struct tcp_sock *tp,
 				  const struct request_sock *req)
@@ -483,7 +491,7 @@ void tcp_ca_openreq_child(struct sock *sk, const struct dst_entry *dst)
 
 	tcp_set_ca_state(sk, TCP_CA_Open);
 }
-EXPORT_SYMBOL_GPL(tcp_ca_openreq_child);
+EXPORT_IPV6_MOD_GPL(tcp_ca_openreq_child);
 
 static void smc_check_reset_syn_req(const struct tcp_sock *oldtp,
 				    struct request_sock *req,
@@ -557,8 +565,7 @@ struct sock *tcp_create_openreq_child(const struct sock *sk,
 	WRITE_ONCE(newtp->write_seq, newtp->pushed_seq = treq->snt_isn + 1);
 
 	if (sock_flag(newsk, SOCK_KEEPOPEN))
-		inet_csk_reset_keepalive_timer(newsk,
-					       keepalive_time_when(newtp));
+		tcp_reset_keepalive_timer(newsk, keepalive_time_when(newtp));
 
 	newtp->rx_opt.tstamp_ok = ireq->tstamp_ok;
 	newtp->rx_opt.sack_ok = ireq->sack_ok;
@@ -901,7 +908,7 @@ embryonic_reset:
 	}
 	return NULL;
 }
-EXPORT_SYMBOL(tcp_check_req);
+EXPORT_IPV6_MOD(tcp_check_req);
 
 /*
  * Queue segment on the new socket if the new socket is active,
@@ -943,4 +950,4 @@ enum skb_drop_reason tcp_child_process(struct sock *parent, struct sock *child,
 	sock_put(child);
 	return reason;
 }
-EXPORT_SYMBOL(tcp_child_process);
+EXPORT_IPV6_MOD(tcp_child_process);
